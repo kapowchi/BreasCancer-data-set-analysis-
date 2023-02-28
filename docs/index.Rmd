@@ -1,0 +1,286 @@
+---
+title: "Analysis of BreastCancer data set"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+## Introduction
+
+This is a project that aims to analyse the BreastCancer data set from the ```mlbench``` package which concerns the characteristics of breast tissue samples collected from 699 women in Wisconsin using fine needle aspiration cytology (FNAC). This is a type of biopsy procedure in which a thin needle is inserted into an area of abnormal-appearing breast tissue. 
+
+Nine easily assessed cytological characteristics, such as uniformity of cell size and shape, were measured for each tissue sample on a one to ten scale. Smaller numbers indicate cells that looked healthier in terms of that characteristic. Further histological examination established whether each of the samples was benign or malignant. 
+
+The ultimate goal of this project is to build a classifier for the Class – benign or malignant – of a tissue sample based on (at least some of) the nine cytological characteristics.
+
+The first half of the project involves some data preprocessing, and then a brief exploratory data analysis. The second half involves the generation of 3 classification models (logistic regression, LDA, QDA) and a comparison between these models. The project concludes by suggesting which model is most suitable out of the three for building a classifier for this data set. 
+
+## Data preprocessing
+
+Initial view of data
+
+```{r}
+library(mlbench)
+data("BreastCancer")
+head(BreastCancer)
+```
+
+Data needs to be cleaned in several ways. Must remove Id column since not necessary for analysis, predictor variables are ordinal so will change the to numeric in order to perform regression analysis, respone variable is string that can take two values so will change it to binary. 
+
+```{r}
+My_BC = data.frame(BreastCancer[,-11], Class = as.integer(BreastCancer$Class) - 1)
+BC <- My_BC[complete.cases(My_BC),]
+myBC <- sapply(BC, as.numeric) 
+BreastC <- data.frame(myBC[,-1])
+head(BreastC)
+```
+
+That looks better! Now onto EDA...
+
+## Exploratory Data Analysis (EDA)
+
+First will generate scatterplot matrix
+
+```{r}
+pairs(BreastC)
+```
+
+One of the most salient features of the scatterplot matrix appears to be that there is a strong, positive, linear relationship between the predictor variables cell.size and cell.shape. This indicates that a regression model that fits the data the best, will perhaps not need both of these predictor variables, as there appears to be a fairly strong correlation between them. The same can also be said for the predictor variables cell.size and bl.cromatin which also appear to have a positive linear relationship, albeit seemingly weaker than that of cell.size and cell.shape.
+
+Now let's plot a correlation matrix in order to better understand the relationship between the predictor variables
+
+```{r}
+cor(BreastC)
+```
+
+
+
+The correlation matrix indicates that there is indeed a very strong, positive correlation between the variables cell.size and cell.shape (with a correlation coefficient of roughly 0.907). This confirms the result that our scatterplot matrix indicated between these two variables having a strong, positive linear relationship. Likewise for the variables cell.size and bl.cromatin, which also have a strong, although weaker positive correlation (with a correlation coefficient of roughly 0.756).
+
+In regards to the response variable Class, the predictor variables that seem to have the strongest correlation with it seem to be: cell.size, cell.shape, and bare.nuclei. All of these have a correlation coefficient of at least 0.8, with the highest coefficient belonging to bare.nuclei (roughly 0.823).
+
+
+The final point to note is that all of the predictor variables appear to have fairly strong (i.e. a correlation coefficient of roughly 0.7 or over) positive correlation with the response variable. The only exception includes the mitoses variable, which has the weakest correlation with the predictor variable by far (correlation coefficient roughly 0.481). 
+
+
+## Modelling
+
+### Logistic Regression
+
+Will first build a logistic regression model for this data set. To determine the best one, will use best subset selection
+
+```{r}
+library(bestglm)
+bss_fit_AIC <- bestglm(BreastC, family = binomial, IC = "AIC")
+bss_fit_BIC <- bestglm(BreastC, family = binomial, IC = "BIC")
+best_AIC <- bss_fit_AIC$ModelReport$Bestk
+best_BIC <- bss_fit_BIC$ModelReport$Bestk
+best_AIC
+best_BIC
+```
+
+We can see that according to BIC, a model with 5 predictors is best, whereas according to AIC, a model with 7 predictors is best. 
+
+We can also perform k-fold cross validation (in this case I use k=10), to see which model may be preferable. 
+
+```{r}
+n <- nrow(BreastC) # Setting number of rows
+p <- ncol(BreastC) - 1 # Setting number of columns
+set.seed(6)
+## sample fold-assignment index
+nfolds <- 10
+fold_index <- sample(nfolds ,n,replace = TRUE) 
+## function that will calculate test error given a particular ## split of the data into training and validation sets
+logistic_reg_fold_error = function(X, y, test_data) {
+  Xy = data.frame(X, y=y)
+  if(ncol(Xy)>1) tmp_fit = glm(y ~ ., data=Xy[!test_data,], family="binomial")
+  else tmp_fit = glm(y ~ 1, data=Xy[!test_data,,drop=FALSE], family="binomial")
+  phat = predict(tmp_fit, Xy[test_data,,drop=FALSE], type="response")
+  yhat = ifelse(phat > 0.5, 1, 0) 
+  yobs = y[test_data]
+  test_error = 1 - mean(yobs == yhat)
+  return(test_error)
+}
+
+## general function for finding test error using cross fold validation
+general_cv = function(X, y, fold_ind, fold_error_function) {
+  p = ncol(X)
+  Xy = cbind(X, y=y)
+  nfolds = max(fold_ind)
+  if(!all.equal(sort(unique(fold_ind)), 1:nfolds)) stop("Invalid fold partition.")
+  fold_errors = numeric(nfolds)
+  # Compute the test error for each fold
+  for(fold in 1:nfolds) {
+    fold_errors[fold] = fold_error_function(X, y, fold_ind==fold)
+  }
+  # Find the fold sizes
+  fold_sizes = numeric(nfolds)
+  for(fold in 1:nfolds) fold_sizes[fold] = length(which(fold_ind==fold))
+  # Compute the average test error across folds
+  test_error = weighted.mean(fold_errors, w=fold_sizes)
+  # Return the test error
+  return(test_error)
+}
+
+## function using k-fold cross validation in best subset selection
+logistic_reg_bss_cv = function(X, y, fold_ind) {
+  p = ncol(X)
+  Xy = data.frame(X, y=y)
+  X = as.matrix(X)
+  nfolds = max(fold_ind)
+  if(!all.equal(sort(unique(fold_ind)), 1:nfolds)) stop("Invalid fold partition.")
+  fold_errors = matrix(NA, nfolds, p+1) # p+1 because M_0 included in the comparison
+  for(fold in 1:nfolds) {
+    # Using all *but* the fold as training data, find the best-fitting models 
+    # with 0, 1, ..., p predictors, i.e. identify the predictors in M_0, M_1, ..., M_p
+    tmp_fit = bestglm(Xy[fold_ind!=fold,], family=binomial, IC="AIC")
+    best_models = as.matrix(tmp_fit$Subsets[,2:(1+p)])
+    # Using the fold as test data, find the test error associated with each of 
+    # M_0, M_1,..., M_p
+    for(k in 1:(p+1)) {
+      fold_errors[fold, k] = logistic_reg_fold_error(X[,best_models[k,]], y, fold_ind==fold)
+    }
+  }
+  # Find the fold sizes
+  fold_sizes = numeric(nfolds)
+  for(fold in 1:nfolds) fold_sizes[fold] = length(which(fold_ind==fold))
+  # For models with 0, 1, ..., p predictors compute the average test error across folds
+  test_errors = numeric(p+1)
+  for(k in 1:(p+1)) {
+    test_errors[k] = weighted.mean(fold_errors[,k], w=fold_sizes)
+  }
+  # Return the test error for models with 0, 1, ..., p predictors
+  return(test_errors)
+}
+cv_errors <- logistic_reg_bss_cv(BreastC[,1:p], BreastC[,p+1], fold_index)
+best_cv <- which.min(cv_errors) - 1
+best_cv
+```
+
+Both AIC and 10-fold cross validation indicate that the model with 7 predictor variables is best, hence I selected this to be the chosen logistic regression model for the BreastCancer data set. By constructing a reduced data set which contained only the 7 predictor variables suggested by the procedure of best subset selection using AIC, and the binary response variable Class, I used the ```glm()``` function to fit the relevant logistic regression model. The predictor variables and their estimated corresponding regression coefficients can be seen in the following coefficient table returned by the glm fit.
+
+```{r}
+indices <- which(bss_fit_AIC$Subsets[8,2:(p+1)]==TRUE)
+
+BreastC_red <- BreastC[,c(indices , p+1)]
+logreg_bf7 <- glm(Class ~., data = BreastC_red, family = "binomial")
+summary(logreg_bf7)
+```
+
+
+As can be seen from the coefficients table above, the 2 predictor variables omitted from the best-fitting 7-predictor logistic regression model are epith.c.size and cell.size. The omission of cell.size within this model is unsurprising given that cell.shape has been included, since recall that from our exploratory data analysis these two variables were extremely highly correlated.
+
+
+The table also demonstrates that all of the coefficients for the 7-predictor variables are positive. This suggests that a higher score for each of the 7 clinical measures corresponding to the predictor variables indicates a higher likelihood of malignancy in the breast-tissue sample collected.
+
+
+It is also worth noting that out of all the predictor variables, cl.thickness and bare.nuclei seem to be the most significant in predicting whether a certain sample of breast-tissue is benign or malignant. This is because, conditional on the inclusion of all other predictor variables, the z tests H0 : βi = 0 versus H1 : βi ̸= 0 for cl.size and bare.nuclei have the smallest p-values. This suggests that if we consider each one of these predictor variables at a time, each of them contribute significantly to a model that already contains the other 6 predictors.
+
+### Linear Discriminant Analysis (LDA)
+
+In order to build a bayes classifier for LDA, I used the reduced data set ```BreastC_red``` with only 7 predictor variables as suggested in the previous section. 
+
+```{r}
+library(MASS)
+lda_fit <- lda(Class ~., data = BreastC_red)
+lda_fit
+```
+
+
+The output demonstrates that the estimates for the group means for the predictor variables when the group is malignant, are far higher than the estimations for when the group is benign.
+
+This result is not surprising, as we found both from our exploratory data analysis and from our regression analysis that higher scores for each of the predictor variables indicated a higher likelihood of malignancy of breast- tissue.
+
+
+In particular, it can be seen that bare.nuclei has the highest mean value for the malignant group (around 7.628). Again this is to be expected, since both our regression and exploratory analysis estimated that the predictor variable that seemed to be the most significant contributor for malignancy, was indeed bare.nuclei.
+
+
+### Quadratic Discriminant Analysis (QDA)
+
+To perform QDA, I again used the ```BreastC_red``` data set 
+
+```{r}
+qda(Class ~ ., data = BreastC_red)
+```
+
+As can be seen from the above, the group mean estimates returned from QDA are identical in value to those returned from the LDA. The only difference between the output of the LDA function from the QDA function is that it does not contain the coefficients of the linear discriminants. Note that this is because the QDA classifier involves a quadratic, rather than a linear, function of predictors.
+
+Given the fact that the two outputs are so similar, we can at this stage only draw the same conclusions made in the previous section about the relationships between the response and predictor variables; namely that the majority of them seem to have high group means when the response group is malignant, and low if it is benign. Moreover the most prominent variable that seems to affect whether a sample of breast tissue is malignant of not is the level of bare nuclei that it has.
+
+## Model Comparison
+
+
+In order to compare the performance of each of the models, I performed 10-fold cross validation on each of the models, and then compared the test errors returned. I made the comparison fair by the using the same fold index vector within my cross validation function that I applied to all the models. This ensured that within my 10-fold cross validation for each of the models, the same partition of the data into folds occurred. Recall that in k-fold cross validation the folds are split into **approximately** equal size, therefore if I had used a different fold index vector for each of the models, a comparison of their performance might not have been fair because their training and test data would have differed.
+
+```{r}
+## Test error for performing 10-fold cross validation on 7-predictor logistic regression
+test_error_lgr7 <-
+general_cv(BreastC_red[,1:7], BreastC_red[,8], fold_index, logistic_reg_fold_error)
+test_error_lgr7
+
+## function for computing lda fold error for particular split of data ## into training and test
+lda_fold_error = function(X, y, test_data) {
+  Xy = data.frame(X, y=y)
+  if(ncol(Xy)>1) tmp_fit = lda(y ~ ., data=Xy[!test_data,])
+  tmp_predict = predict(tmp_fit, Xy[test_data,])
+  yhat = tmp_predict$class 
+  yobs = y[test_data]
+  test_error = 1 - mean(yobs == yhat)
+  return(test_error)
+}
+
+## can now pass this function as an argument to the general CV function to compute test error for lda by cross validation
+test_error_cv_for_lda <-
+general_cv(BreastC_red[,1:7], BreastC_red[,8], fold_index, lda_fold_error)
+test_error_cv_for_lda
+
+## Function for computing qda fold error
+
+qda_fold_error = function(X, y, test_data) {
+  Xy = data.frame(X, y=y)
+  if(ncol(Xy)>1) tmp_fit = qda(y ~ ., data=Xy[!test_data,])
+  tmp_predict = predict(tmp_fit, Xy[test_data,])
+  yhat = tmp_predict$class 
+  yobs = y[test_data]
+  test_error = 1 - mean(yobs == yhat)
+  return(test_error)
+}
+
+## apply general CV function to calculate test error
+test_error_cv_for_qda <-
+general_cv(BreastC_red[,1:7], BreastC_red[,8], fold_index, qda_fold_error)
+test_error_cv_for_qda
+
+```
+
+
+Regarding the test errors for LDA and QDA, it can be seen that QDA has a higher error rate than that of LDA. This result is not particularly surprising however, since LDA is a much less flexible classifier than QDA since it assumes that the K classes share a common covariance matrix. Consequently, LDA usually has a lower variance than QDA, leading to improved predictive performance, and thereby a lower test error rate. However, it is important to note that this variance comes at a cost, namely that if the assumption of a common covariance matrix is unjustified, then LDA will be more biased than QDA. 
+
+
+Since this is a real-life data set, a common covariance of variables across both the classes benign and malignant is unlikely. In order to test this however, I split the data set used for the LDA and QDA into two separate data sets. One data set contained only the multivariate observations for all of the individuals who were assigned to the benign group, and the other contained those who were assigned to the malignant group. I then calculated the covariance matrices for our predictor variables (i.e. X1, ..., X7) across both groups, using the ```cov()``` function on both data sets. 
+```{r}
+## Splitting data set into two seperate data sets, each corresponding to ## multivariate observations for each group
+BC.red.subset <- subset(BreastC_red, Class == "0")
+BC.red.subset2 <- subset(BreastC_red, Class == "1")
+
+
+## Covariance matrix for predictor variables when group = Benign 
+
+BCred_predictors_class0 <- BC.red.subset[,1:7] 
+
+cov(BCred_predictors_class0)
+
+BCred_predictors_class1 <- BC.red.subset2[,1:7] 
+
+cov(BCred_predictors_class1)
+
+## Clearly assumption of common covariance matrix made by LDA has not been met since the matrices are non-identical
+```
+
+The covariance matrices for the predictor variables across both groups are not identical, hence even though QDA returns a higher test error than LDA, QDA may still be a more appropriate classification method than LDA in this case.
+
+Out of all of the modelling techniques however, the logistic regression model found via best subset selection, has the lowest test error rate. One of the advantages that logistic regression has over both LDA and QDA is that it does not assume anything about the distribution of the predictor variables X1,...,X7, whereas both LDA and QDA assume this distribution to be multivariate normal. Therefore, given the fact that the logistic regression model has the lowest test-rate error, and given the fact that it is not committed to the assumption of multivariate normal distribution for predictor variables, it can be argued that perhaps this is the most preferable classification method for building a classifier for the BreastCancer data set. 
